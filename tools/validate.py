@@ -5,7 +5,7 @@ Remaining
 """
 
 import inspect
-import utils
+import myutils as utils
 import pprint
 
 class Bbox:
@@ -132,7 +132,7 @@ def compute_image_ious(gndtruths, proposals, cls, iouthresh=0.5):
 ##########################################################
 def get_imageids_from_method(conn, gndtruthid):
     cur = conn.cursor()
-    query = ''' SELECT imageid FROM ImageMethod WHERE methodid={} '''\
+    query = ''' SELECT imageid FROM tek.ImageMethod WHERE methodid={} '''\
     ''' ORDER BY imageid;'''. format(gndtruthid)
     cur.execute(query)
     raw = cur.fetchall()
@@ -143,7 +143,7 @@ def get_imageids_from_method(conn, gndtruthid):
 def get_classes_from_method(conn, methodid):
     cur = conn.cursor()
     #query = ''' SELECT classid FROM MethodClass WHERE methodid={};'''. \ #TODO:FIX IT
-    query = ''' SELECT classid FROM MethodClass WHERE methodid=1;'''. \
+    query = ''' SELECT classid FROM tek.MethodClass WHERE methodid=1;'''. \
             format(methodid)
     cur.execute(query)
     raw = cur.fetchall()
@@ -159,16 +159,19 @@ def create_dict_str(_dict, sortedkeys, header):
     return line
 
 ##########################################################
-def get_bboxes_from_method(conn, methodid, imageid):
+def get_bboxes_from_method(conn, methodid, imageid, minheight=0):
     cur = conn.cursor()
     query = ''' SELECT x_min, y_min, x_max, y_max, classid, prob FROM tek.Bbox ''' \
     ''' WHERE methodid={} AND imageid={};'''.format(methodid, imageid)
     cur.execute(query)
     raw = cur.fetchall()
     ret = []
+
     for r in raw:
+        if r[3] - r[1] < minheight: continue
         ret.append(Bbox(x=(r[2]+r[0])/2, w=r[2]-r[0], y=(r[3]+r[1])/2,
-            h=r[3]-r[1], clsid=r[4], prob=r[5]))
+                        h=r[3]-r[1], clsid=r[4], prob=r[5]))
+
     return ret
 
 ##########################################################
@@ -219,7 +222,7 @@ def compute_recall(acccorrects, accgndtruths):
     return recall
 
 ##########################################################
-def validate_method(conn, methid, gndtruthid, outcsv, iouthresh=0.5,
+def validate_method(conn, methid, gndtruthid, outcsv, minheight, iouthresh=0.5,
         probthresh=0.0):
     """Validate method of method id methid against the results from the
     method gndtruthid
@@ -245,8 +248,8 @@ def validate_method(conn, methid, gndtruthid, outcsv, iouthresh=0.5,
     print('Validating ids:')
     for imageid in ids:
         print('{}'.format(imageid))
-        gndtruths = get_bboxes_from_method(conn, gndtruthid, imageid)
-        proposals = get_bboxes_from_method(conn, methid, imageid)
+        gndtruths = get_bboxes_from_method(conn, gndtruthid, imageid, minheight)
+        proposals = get_bboxes_from_method(conn, methid, imageid, minheight)
 
         for cls in classes:
             fproposals = filter_bboxes_by_prob(proposals, probthresh)
@@ -272,12 +275,14 @@ def validate_method(conn, methid, gndtruthid, outcsv, iouthresh=0.5,
 ##########################################################
 def main():
     dbconfig = 'config/db.json'
-    methid = 4
+    methid = 7
     gndtruthid = 2
-    outcsv = '/tmp/validation'+str(methid)+'.csv'
+    #minheight = 150
     conn = utils.db_connect(dbconfig)
 
-    validate_method(conn, methid, gndtruthid, outcsv)
+    for minheight in range(0, 290, 20):
+        outcsv = '/tmp/validation'+str(methid)+ '-thresh' + str(minheight) + '.csv'
+        validate_method(conn, methid, gndtruthid, outcsv, minheight)
 
 if __name__ == "__main__":
     main()
