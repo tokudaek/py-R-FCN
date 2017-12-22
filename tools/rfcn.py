@@ -17,10 +17,12 @@ import matplotlib
 matplotlib.use('Agg'); flag_agg = True #Deactivate X
 import matplotlib.pyplot as plt
 
+import psycopg2
 import _init_paths
 from fast_rcnn.config import cfg
 from fast_rcnn.test import im_detect
 from fast_rcnn.nms_wrapper import nms
+import utils
 from utils.timer import Timer
 import numpy as np
 import scipy.io as sio
@@ -29,6 +31,11 @@ import argparse
 import inspect
 import time
 import os
+import sys
+import logging
+dir_path = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, dir_path)
+import myutils
 
 HOME = os.environ['HOME']
 
@@ -44,7 +51,6 @@ CLASSES = ('__background__',
            'cow', 'diningtable', 'dog', 'horse',
            'motorbike', 'person', 'pottedplant',
            'sheep', 'sofa', 'train', 'tvmonitor')
-           #'car')
 
 NETS = {'ResNet-101': ('ResNet-101',
                        'resnet101_rfcn_final.caffemodel'),
@@ -60,9 +66,13 @@ def main():
     out_dir = args.out_dir
     caffemodel = args.caffemodel
     prototxt = args.prototxt
-
+    gpuid = args.gpu_id
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
+
+    dbjson = 'config/db.json'
+    conn = myutils.db_connect(dbjson)
+    conn.autocommit = False
 
     if flag_agg:
         print "##########################################################"
@@ -77,39 +87,64 @@ def main():
     if not os.path.isfile(caffemodel):
         raise IOError(caffemodel)
 
+    methodid = 7
+    thresh = CONF_THRESH
+    nms = NMS_THRESH
+    ids, relpaths, rolls = myutils.db_get_nonprocessed_images(conn, methodid)
+    run(ids, relpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
+        methodid, _buffer, dbjson, thresh, nms, _delete)
+
+##########################################################
+def run(ids, relpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
+        methodid, dbjson, _buffer, logfile, _thresh, _nms, _delete):
+
+    conn = myutils.db_connect(dbjson)
+    conn.autocommit = False
+
+    cfg.TEST.HAS_RPN = True  # Use RPN for proposals
+
+    logging.basicConfig(filename=logfile, level=logging.DEBUG)
+    #print ("prototxt: " + prototxt)
+    #print ("caffemodel: " + caffemodel)
+    logging.debug("prototxt: " + prototxt)
+    logging.debug("caffemodel: " + caffemodel)
+
+    if not os.path.isfile(caffemodel):
+        raise IOError(caffemodel)
+
     caffe.set_mode_gpu()
-    caffe.set_device(args.gpu_id)
-    cfg.GPU_ID = args.gpu_id
+    caffe.set_device(gpuid)
+    cfg.GPU_ID = gpuid
 
-    print '\n\nLoading network {:s}...'.format(caffemodel)
+    #print '\n\nLoading network {:s}...'.format(caffemodel)
+    logging.debug ('\n\nLoading network {:s}...'.format(caffemodel))
     net = caffe.Net(prototxt, caffemodel, caffe.TEST)
-    print('Network loaded.')
-    
-    if list_files:
-        with open(list_files) as fh:
-            list_files = fh.read().splitlines()
-    else:
-        allfiles = os.listdir(in_dir)
-        list_files = []
-        for file_ in allfiles:
-            if file_.endswith(".jpg"):
-                list_files.append(file_[:-4])
-        #list_files = [a[:-4] for a in aux]
-        #list_files = [l for l in list_files if l.endswith('.jpg')]
-        print(list_files)
+    #print('Network loaded.')
+    logging.debug('Network loaded')
 
-    for im_name in list_files:
-        if im_name:
-            img = im_name + '.jpg'
-            demo(net, in_dir, out_dir, img)
+    #LENBUFFER = 20
+    counter = 0
+
+    for relpath, id, roll in zip(relpaths, ids, rolls):
+        commit = counter % _buffer == 0
+        try:
+            added = demo(conn, net, in_dir, out_dir, relpath, id, roll,
+                         methodid, _thresh, _nms, commit, _delete)
+            logging.debug('{}: {}'.format(counter, id))
+        except psycopg2.Error as e:
+            logging.debug('Could not process ' + str(id))
+            added = 0
+
+        counter += added
+
+    conn.close()
+    return counter
 
 def vis_detections(im, out_dir, image_name, class_name, dets, thresh=0.5):
     """Draw detected bounding boxes."""
 
     inds = np.where(dets[:, -1] >= thresh)[0]
 
-    #print ("checkpoint in " + inspect.stack()[0][3])
-    
     if len(inds) == 0:  #In case it does not have bboxes
         out_file = os.path.join(out_dir, image_name)
         if not os.path.isfile(out_file):
@@ -126,7 +161,7 @@ def vis_detections(im, out_dir, image_name, class_name, dets, thresh=0.5):
     fig, ax = plt.subplots(figsize=(12, 12))
     ax.imshow(im, aspect='equal')
 
-    print(image_name)
+    #print(image_name) #TODO: Get the id
     for i in inds:
         bbox = dets[i, :4]
         score = dets[i, -1]
@@ -141,8 +176,6 @@ def vis_detections(im, out_dir, image_name, class_name, dets, thresh=0.5):
                 '{:s} {:.3f}'.format(class_name, score),
                 bbox=dict(facecolor='blue', alpha=0.5),
                 fontsize=14, color='white')
-        print('{:s} {:.3f} y:{:d} h:{:d}', image_name, score, bbox[0],
-              bbox[1],bbox[2],bbox[3],bbox[3]-bbox[1])
 
     ax.set_title(('{} detections with '
                   'p({} | box) >= {:.1f}').format(class_name, class_name,
@@ -152,49 +185,79 @@ def vis_detections(im, out_dir, image_name, class_name, dets, thresh=0.5):
     plt.tight_layout()
     #plt.draw()
 
-    #print (os.path.join(out_dir, image_name))
-    finaloutname = os.path.splitext(image_name)[0] + '_' + class_name + '.jpg'
-    plt.savefig(os.path.join(out_dir, finaloutname))
+    plt.savefig(os.path.join(out_dir, image_name))
     plt.close()
 
-def demo(net, in_dir, out_dir, image_name):
+#########################################################
+def detectandstore(conn, im, updown, id, class_name, dets, methodid, thresh):
+    """Draw detected bounding boxes."""
+
+    inds = np.where(dets[:, -1] >= thresh)[0]
+    hh,ww,_ = im.shape
+    c = [ww/2, hh/2, ww/2, hh/2]
+
+    cur = conn.cursor()
+
+    if len(inds) != 0:  #In case it has bboxes
+        im = im[:, :, (2, 1, 0)] #BGR
+
+        for i in inds:  #For each bbox of thisclass
+            bbox = dets[i, :4]
+            score = dets[i, -1]
+            b = bbox
+
+            query = '''INSERT INTO tek.Bbox ''' \
+                ''' (imageid, prob, x_min, y_min, x_max, y_max, methodid, classid) ''' \
+                ''' SELECT {},{},{},{},{},{},{},Class.id from tek.Class WHERE name='{}'; ''' \
+            .format(id, score, b[0], b[1], b[2], b[3], methodid, class_name)
+            #print(query)
+            cur.execute(query)
+
+#########################################################
+def demo(conn, net, in_dir, out_dir, relpath, id, roll, methodid, _nms,
+         _thresh, commit=True, remove=False):
     """Detect object classes in an image using pre-computed object proposals."""
 
-    im_file = os.path.join(in_dir, image_name)
-    print (im_file)
+    im_file = os.path.join(in_dir, relpath)
     im = cv2.imread(im_file)
+    updown = False
+    if (im is None): return 0
 
-    # Detect all object classes and regress object bounds
-    timer = Timer()
-    timer.tic()
+    if int(roll) > 0: # Rotate 180deg the image
+        rows,cols, _ = im.shape
+        M = cv2.getRotationMatrix2D((cols/2,rows/2),180,1)
+        im = cv2.warpAffine(im,M,(cols,rows))
+        updown = True
+
     scores, boxes = im_detect(net, im)
-    timer.toc()
-    print ('Detection took {:.3f}s for '
-           '{:d} object proposals').format(timer.total_time, boxes.shape[0])
 
     for cls_ind, cls in enumerate(CLASSES[1:]):
         cls_ind += 1
-
-    #if True:  # Uncomment this if we are using all classes and we want just one class result
-        #cls_ind = 2
-        #cls = 'bycicle'
-        #cls_ind = 15
-        #cls = 'person'
-        #cls_ind = 7
-        #cls = 'car'
 
         #cls_boxes = boxes[:, 4*cls_ind:4*(cls_ind + 1)]
         cls_boxes = boxes[:, 4:8]
         cls_scores = scores[:, cls_ind]
         dets = np.hstack((cls_boxes,
                           cls_scores[:, np.newaxis])).astype(np.float32)
-        keep = nms(dets, NMS_THRESH)
+        keep = nms(dets, _nms)
         dets = dets[keep, :]
-        vis_detections(im, out_dir, image_name, cls, dets, thresh=CONF_THRESH)
+        #vis_detections(im, out_dir, image_name, cls, dets, thresh=CONF_THRESH)
+        detectandstore(conn, im, updown, id, cls, dets, methodid, _thresh)
+
+    cur = conn.cursor()
+    query = '''INSERT INTO tek.ImageMethod (imageid,methodid) VALUES ({},{});''' \
+        .format(id, methodid)
+
+    cur.execute(query)
+    if commit: conn.commit()
+    if remove:
+        try: os.remove(os.path.join(in_dir, relpath))
+        except: pass
+    return 1
 
 def parse_args():
     """Parse input arguments."""
-    parser = argparse.ArgumentParser(description='Faster R-CNN demo')
+    parser = argparse.ArgumentParser(description='Py-R-FCN demo')
     parser.add_argument('--gpu', dest='gpu_id', help='GPU device id to use [0]',
                         default=0, type=int)
     parser.add_argument('--cpu', dest='cpu_mode',

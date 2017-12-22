@@ -1,6 +1,7 @@
 # py-R-FCN
 R-FCN: Object Detection via Region-based Fully Convolutional Networks
 
+This forked repo contains changes to fit my needs.
 
 **It is highly recommended to use the [MXNet version of R-FCN/Deformable R-FCN](https://github.com/msracver/Deformable-ConvNets), which supports multi-GPU train/test.**
 

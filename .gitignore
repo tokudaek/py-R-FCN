@@ -5,6 +5,8 @@ lib/pycocotools/_mask.c
 lib/pycocotools/_mask.so
 caffe
 output
+*.json
+mydaemon.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

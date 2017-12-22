@@ -1,0 +1,7 @@
+{
+	"host":"ici",
+	"dbname":"donees",
+	"user":"user",
+	"password":"motdepasse",
+	"port":5433
+}
