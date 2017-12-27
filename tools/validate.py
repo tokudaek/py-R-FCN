@@ -5,8 +5,10 @@ Remaining
 """
 
 import inspect
-import myutils as utils
+import sys; sys.path.append('tools/')
+import utils
 import pprint
+import os
 
 class Bbox:
     def __init__(self, x=-1, y=-1, w=-1, h=-1, clsid=-1, prob=-1.0):
@@ -212,18 +214,8 @@ def compute_precision(acccorrects, accproposals):
     return precision
 
 ##########################################################
-def compute_recall(acccorrects, accgndtruths):
-    recall = {}
-    for k in acccorrects.keys():
-        if accproposals[k] != 0:
-            recall[k] = float(acccorrects[k]) / accgndtruths[k]
-        else:
-            recall[k] = -1
-    return recall
-
-##########################################################
-def validate_method(conn, methid, gndtruthid, outcsv, minheight, iouthresh=0.5,
-        probthresh=0.0):
+def validate_method(conn, methid, gndtruthid, outcsv, minheight, gndtruthheight=0, iouthresh=0.5,
+        probthresh=0.0, ):
     """Validate method of method id methid against the results from the
     method gndtruthid
 
@@ -231,6 +223,7 @@ def validate_method(conn, methid, gndtruthid, outcsv, minheight, iouthresh=0.5,
     conn(psycopg2.connection): open connection
     methid(int): id of the method being validated
     grndtruthid(int): id of the method of manually labelling
+    gndtruthheight(float): minimum height of the objects
     classid(int): class id
     iouthresh(float): threshold of IoU
     probthresh(float): threshold probability of each candidate
@@ -245,10 +238,12 @@ def validate_method(conn, methid, gndtruthid, outcsv, minheight, iouthresh=0.5,
     acciou = dict.fromkeys(classes, 0)
     accind = dict.fromkeys(classes, [])
 
-    print('Validating ids:')
+    avgcorrect = 0
+    avgfp = dict.fromkeys(classes, 0)
     for imageid in ids:
-        print('{}'.format(imageid))
-        gndtruths = get_bboxes_from_method(conn, gndtruthid, imageid, minheight)
+        #print('{}'.format(imageid))
+        #gndtruths = get_bboxes_from_method(conn, gndtruthid, imageid, minheight)
+        gndtruths = get_bboxes_from_method(conn, gndtruthid, imageid, gndtruthheight)
         proposals = get_bboxes_from_method(conn, methid, imageid, minheight)
 
         for cls in classes:
@@ -263,26 +258,52 @@ def validate_method(conn, methid, gndtruthid, outcsv, minheight, iouthresh=0.5,
             acccorrects[cls] += cor
             acciou[cls] += iou
             accind[cls] += ind
+        #avgcorrect += acccorrects[1]
 
+    for cls in classes:
+        avgfp[cls] = (accproposals[cls] - acccorrects[cls]) / len(ids)
+
+    #print(avgfp[1])
     precision = compute_precision(acccorrects, accproposals)
     recall = compute_precision(acccorrects, accgndtruths)
+
     output = get_formatted_output(len(ids), accgndtruths, accproposals,
             acccorrects, acciou, precision, recall)
-    with open(outcsv, 'w') as fh:
-        fh.write(output)
-    return output
+
+    #with open(outcsv, 'w') as fh:
+        #fh.write(output)
+
+    return precision[1], recall[1], avgfp[1]
 
 ##########################################################
 def main():
     dbconfig = 'config/db.json'
     methid = 7
     gndtruthid = 2
+    outdir = '/tmp'
     #minheight = 150
     conn = utils.db_connect(dbconfig)
 
-    for minheight in range(0, 290, 20):
-        outcsv = '/tmp/validation'+str(methid)+ '-thresh' + str(minheight) + '.csv'
-        validate_method(conn, methid, gndtruthid, outcsv, minheight)
+    res1 = {}
+    for minheight in range(0, 290, 40):
+        print('Validating method for minheight=' + str(minheight))
+        outcsv = os.path.join(outdir, 'validation' + str(methid)+ '-thresh' + str(minheight) + '.csv')
+        res1[minheight] = validate_method(conn, methid, gndtruthid, outcsv, minheight)
+
+    ############################################################
+    res2 = {}
+    for minheight in range(0, 290, 40):
+        print('Validating method for minheight=' + str(minheight))
+        outcsv = os.path.join(outdir, 'validation' + str(methid)+ '-thresh' + str(minheight) + '.csv')
+        res2[minheight] = validate_method(conn, methid, gndtruthid, outcsv, minheight, 120)
+
+    ############################################################
+    with open(os.path.join(outdir, 'validation' + str(methid) + '_summary.csv'), 'w') as fh:
+        fh.write('Threshold,Precision,Recall,AvgNumFP,Precision*,Recall*,AvgNumFP*\n')
+        for k in sorted(res1.keys()):
+            v1 = res1[k]
+            v2 = res2[k]
+            fh.write('{},{},{},{},{},{},{}\n'.format(k, v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]))
 
 if __name__ == "__main__":
     main()
