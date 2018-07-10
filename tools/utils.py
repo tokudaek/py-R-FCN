@@ -205,6 +205,33 @@ def dump_vocxmls_into_db(dbconf, xmlsdir, methid):
     print('{} imagemethods sucessfully inserted into db.'.format(str(nimageexecutions)))
 
 ##########################################################
+def generate_csvs_from_xml(xmlsdir):
+    """Input structures into db. It expects and input a list
+    of 3-uples (width, height, [hash]), where [hash] is a list
+    of hash with keys ['name', 'xmin', 'ymin', 'xmax', 'ymax']
+
+    Args:
+    filesbboxes(list): list of 3-uples (width, height, [hash]),
+    where [hash] is a list of hashes, each with keys
+    ['name', 'xmin', 'ymin', 'xmax', 'ymax']
+
+    Return:
+    nbboxes, nimages
+    """
+    filesbboxes = read_dir_xmls(xmlsdir)
+
+    nbboxes = 0
+    nimagemethods = 0
+
+    for f in filesbboxes:
+        id = f['id']
+
+        for b in f['bboxes']:
+            r = '{},{},{},{},{}'. \
+                format(str(id).replace('.jpg', ''), int(b['xmin']), int(b['ymin']),
+                       int(b['xmax']), int(b['ymax']))
+            print(r)
+
 def db_input_annotations(conn, filesbboxes, methodid):
     """Input structures into db. It expects and input a list
     of 3-uples (width, height, [hash]), where [hash] is a list
