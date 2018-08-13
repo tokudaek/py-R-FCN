@@ -40,7 +40,7 @@ import myutils
 HOME = os.environ['HOME']
 
 ####################### PARAMS #############################
-CONF_THRESH = 0.25
+CONF_THRESH = 0.0
 NMS_THRESH = 0.3
 
 METHODS = ['faster_rcnn_end2end', 'faster_rcnn_alt_opt', 'fast_rcnn']
@@ -90,12 +90,23 @@ def main():
     methodid = 7
     thresh = CONF_THRESH
     nms = NMS_THRESH
-    ids, relpaths, rolls = myutils.db_get_nonprocessed_images(conn, methodid)
-    run(ids, relpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
-        methodid, _buffer, dbjson, thresh, nms, _delete)
+    fullpaths = []
+    for f in os.listdir(in_dir):
+        if not f.endswith('.jpg'): continue
+        fullpaths.append(os.path.join(in_dir, f))
+    #with open(list_files) as f:
+            #fullpaths = f.read().splitlines()
+    #ids, relpaths, rolls = myutils.db_get_nonprocessed_images(conn, methodid)
+    nn = len(fullpaths)
+    ids = [1] * nn
+    rolls = [0] * nn
+    _buffer = 101
+    _delete = False
+    run(ids, fullpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
+        methodid, dbjson, _buffer, '/tmp/out.log', thresh, nms, _delete)
 
 ##########################################################
-def run(ids, relpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
+def run(ids, fullpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
         methodid, dbjson, _buffer, logfile, _thresh, _nms, _delete):
 
     conn = myutils.db_connect(dbjson)
@@ -103,7 +114,8 @@ def run(ids, relpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
 
     cfg.TEST.HAS_RPN = True  # Use RPN for proposals
 
-    logging.basicConfig(filename=logfile, level=logging.DEBUG)
+    #logging.basicConfig(filename=logfile, level=logging.DEBUG)
+    logging.basicConfig(level=logging.ERROR)
     #print ("prototxt: " + prototxt)
     #print ("caffemodel: " + caffemodel)
     logging.debug("prototxt: " + prototxt)
@@ -125,10 +137,12 @@ def run(ids, relpaths, rolls, in_dir, out_dir, caffemodel, prototxt, gpuid,
     #LENBUFFER = 20
     counter = 0
 
-    for relpath, id, roll in zip(relpaths, ids, rolls):
+    #print('checkpoint')
+    #print(fullpaths)
+    for fullpath, id, roll in zip(fullpaths, ids, rolls):
         commit = counter % _buffer == 0
         try:
-            added = demo(conn, net, in_dir, out_dir, relpath, id, roll,
+            added = demo(conn, net, in_dir, out_dir, fullpath, id, roll,
                          methodid, _thresh, _nms, commit, _delete)
             logging.debug('{}: {}'.format(counter, id))
         except psycopg2.Error as e:
@@ -192,6 +206,7 @@ def vis_detections(im, out_dir, image_name, class_name, dets, thresh=0.5):
 def detectandstore(conn, im, updown, id, class_name, dets, methodid, thresh):
     """Draw detected bounding boxes."""
 
+    #print('XXXXXXXXXX')
     inds = np.where(dets[:, -1] >= thresh)[0]
     hh,ww,_ = im.shape
     c = [ww/2, hh/2, ww/2, hh/2]
@@ -210,15 +225,17 @@ def detectandstore(conn, im, updown, id, class_name, dets, methodid, thresh):
                 ''' (imageid, prob, x_min, y_min, x_max, y_max, methodid, classid) ''' \
                 ''' SELECT {},{},{},{},{},{},{},Class.id from tek.Class WHERE name='{}'; ''' \
             .format(id, score, b[0], b[1], b[2], b[3], methodid, class_name)
-            #print(query)
-            cur.execute(query)
+            print(query)
+            #cur.execute(query)
 
 #########################################################
-def demo(conn, net, in_dir, out_dir, relpath, id, roll, methodid, _nms,
+def demo(conn, net, in_dir, out_dir, fullpath, id, roll, methodid, _nms,
          _thresh, commit=True, remove=False):
     """Detect object classes in an image using pre-computed object proposals."""
 
-    im_file = os.path.join(in_dir, relpath)
+    #im_file = os.path.join(in_dir, relpath)
+    im_file = fullpath
+    #print(im_file)
     im = cv2.imread(im_file)
     updown = False
     if (im is None): return 0
@@ -229,7 +246,10 @@ def demo(conn, net, in_dir, out_dir, relpath, id, roll, methodid, _nms,
         im = cv2.warpAffine(im,M,(cols,rows))
         updown = True
 
+    a = time.time()
     scores, boxes = im_detect(net, im)
+    elapsedtime = time.time() - a
+    #print(elapsedtime)
 
     for cls_ind, cls in enumerate(CLASSES[1:]):
         cls_ind += 1
@@ -237,8 +257,11 @@ def demo(conn, net, in_dir, out_dir, relpath, id, roll, methodid, _nms,
         #cls_boxes = boxes[:, 4*cls_ind:4*(cls_ind + 1)]
         cls_boxes = boxes[:, 4:8]
         cls_scores = scores[:, cls_ind]
+        print(cls_boxes.shape)
+        print(cls_scores.shape)
         dets = np.hstack((cls_boxes,
                           cls_scores[:, np.newaxis])).astype(np.float32)
+        #print(dets.shape)
         keep = nms(dets, _nms)
         dets = dets[keep, :]
         #vis_detections(im, out_dir, image_name, cls, dets, thresh=CONF_THRESH)
@@ -248,11 +271,11 @@ def demo(conn, net, in_dir, out_dir, relpath, id, roll, methodid, _nms,
     query = '''INSERT INTO tek.ImageMethod (imageid,methodid) VALUES ({},{});''' \
         .format(id, methodid)
 
-    cur.execute(query)
-    if commit: conn.commit()
-    if remove:
-        try: os.remove(os.path.join(in_dir, relpath))
-        except: pass
+    #cur.execute(query)
+    #if commit: conn.commit()
+    #if remove:
+        #try: os.remove(os.path.join(in_dir, relpath))
+        #except: pass
     return 1
 
 def parse_args():
